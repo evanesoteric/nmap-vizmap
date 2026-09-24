@@ -388,3 +388,13 @@ For reference — the shape of `scans/hosts.json`:
 You can post-process this file however you like — feed it to other tools,
 diff two scans to see what changed, grep for specific services, etc. The
 HTML is just one possible consumer.
+
+---
+
+## License / Attribution
+
+MIT License. The scripts are yours to modify.
+
+Third-party components retain their original licenses:
+- nmap is (c) the Nmap Project (GPL).
+- D3.js is (c) Mike Bostock (ISC).
