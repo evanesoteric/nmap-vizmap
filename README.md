@@ -1,4 +1,3 @@
-cat > README.md << 'READMEEOF'
 # Nmap LAN Visualizer
 
 Turn an `nmap` XML scan into an interactive, clickable network topology
