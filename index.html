@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Nmap Topology</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #eee; display: flex; height: 100vh; }
+    #graph { flex: 1; }
+    svg { width: 100%; height: 100%; }
+    .link { stroke: #444; stroke-width: 1.5px; }
+    .node circle { stroke: #fff; stroke-width: 1.5px; cursor: pointer; }
+    .node text { font-size: 11px; fill: #ddd; pointer-events: none; }
+    .gateway circle { fill: #e67e22; }
+    .host circle { fill: #3498db; }
+    .node.selected circle { stroke: #f1c40f; stroke-width: 3px; }
+    .node.dimmed { opacity: 0.15; }
+
+    /* Sidebar */
+    #sidebar {
+      width: 360px; background: #1a1a1a; border-left: 1px solid #333;
+      padding: 16px; overflow-y: auto; box-sizing: border-box;
+      font-size: 13px; line-height: 1.5;
+    }
+    #sidebar h2 { margin: 0 0 4px; font-size: 15px; color: #f1c40f; }
+    #sidebar h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase;
+                  color: #888; letter-spacing: .05em; border-bottom: 1px solid #333; padding-bottom: 4px; }
+    #sidebar .kv { display: grid; grid-template-columns: 100px 1fr; gap: 2px 8px; }
+    #sidebar .kv div:nth-child(odd) { color: #888; }
+    #sidebar code { background: #000; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+    #sidebar table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+    #sidebar th, #sidebar td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #2a2a2a; }
+    #sidebar th { color: #888; font-weight: normal; }
+    .state-open     { color: #2ecc71; }
+    .state-closed   { color: #e74c3c; }
+    .state-filtered { color: #f39c12; }
+    #hint { color: #666; font-style: italic; }
+  </style>
+</head>
+<body>
+
+<div id="graph"><svg id="map"></svg></div>
+
+<div id="sidebar">
+  <p id="hint">Click a node to see full details. Drag nodes to rearrange. Scroll to zoom.</p>
+</div>
+
+<!-- For offline: replace with src="d3.v7.min.js" -->
+<script src="vendor/d3.v7.min.js"></script>
+<script>
+d3.json("scans/hosts.json").then(data => {
+  const hosts = data.hosts;
+  const scanMeta = data.scan || {};
+
+  const gateway = { id: "gateway", label: "LAN Gateway", type: "gateway" };
+  const nodes = [gateway, ...hosts.map(h => ({
+    id: h.ip, label: h.hostname || h.ip, type: "host", ...h
+  }))];
+  const links = hosts.map(h => ({ source: "gateway", target: h.ip }));
+
+  const svg = d3.select("#map");
+  const width  = () => document.getElementById("graph").clientWidth;
+  const height = () => document.getElementById("graph").clientHeight;
+
+  // Zoom/pan container
+  const g = svg.append("g");
+  svg.call(d3.zoom().scaleExtent([0.2, 4]).on("zoom", e => g.attr("transform", e.transform)));
+
+  const sim = d3.forceSimulation(nodes)
+    .force("link",    d3.forceLink(links).id(d => d.id).distance(140))
+    .force("charge",  d3.forceManyBody().strength(-500))
+    .force("center",  d3.forceCenter(width()/2, height()/2))
+    .force("collide", d3.forceCollide(36));
+
+  const link = g.append("g").selectAll("line")
+    .data(links).join("line").attr("class", "link");
+
+  const node = g.append("g").selectAll("g")
+    .data(nodes).join("g")
+    .attr("class", d => `node ${d.type}`)
+    .call(d3.drag()
+      .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag",  (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on("end",   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  node.append("circle").attr("r", d => d.type === "gateway" ? 14 : 9);
+
+  node.append("text")
+    .attr("x", 12).attr("y", 4)
+    .text(d => d.type === "gateway"
+      ? d.label
+      : `${d.label} (${(d.ports||[]).filter(p => p.state === "open").length})`);
+
+  // Highlight nodes with no open ports differently
+  node.filter(d => d.type === "host" && !(d.ports||[]).some(p => p.state === "open"))
+      .select("circle").attr("fill", "#555");
+
+  // === Click to show details ===
+  node.on("click", (event, d) => {
+    event.stopPropagation();
+    node.classed("selected", n => n === d);
+    showDetails(d, scanMeta);
+  });
+
+  // Click empty space to deselect
+  svg.on("click", () => {
+    node.classed("selected", false);
+    d3.select("#sidebar").html('<p id="hint">Click a node to see full details. Drag nodes to rearrange. Scroll to zoom.</p>');
+  });
+
+  sim.on("tick", () => {
+    link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+        .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+    node.attr("transform", d => `translate(${d.x},${d.y})`);
+  });
+
+  // === Sidebar renderer ===
+  function esc(s) {
+    return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  }
+
+  function showDetails(d, scanMeta) {
+    const sb = d3.select("#sidebar");
+
+    if (d.type === "gateway") {
+      sb.html(`
+        <h2>LAN Gateway</h2>
+        <p style="color:#888">Synthetic node representing the local network edge.</p>
+        <h3>Scan Info</h3>
+        <div class="kv">
+          <div>Nmap</div><div>${esc(scanMeta.nmap_version || "?")}</div>
+          <div>Args</div><div><code>${esc(scanMeta.args || "?")}</code></div>
+          <div>Started</div><div>${esc(scanMeta.start || "?")}</div>
+          <div>Finished</div><div>${esc(scanMeta.finished || "?")}</div>
+          <div>Elapsed</div><div>${esc(scanMeta.elapsed || "?")}s</div>
+          <div>Hosts up</div><div>${esc(scanMeta.hosts_up || "?")} / ${esc(scanMeta.hosts_total || "?")}</div>
+        </div>
+      `);
+      return;
+    }
+
+    // --- Host details ---
+    const openPorts = (d.ports || []).filter(p => p.state === "open");
+    const otherPorts = (d.ports || []).filter(p => p.state !== "open");
+
+    // OS: pick the highest-accuracy match
+    let osBlock = "<p style='color:#888'>No OS match (scan without <code>-O</code>, or no response to probes).</p>";
+    if (d.os && d.os.matches && d.os.matches.length) {
+      const best = [...d.os.matches].sort((a,b) => (+b.accuracy||0) - (+a.accuracy||0));
+      const top = best[0];
+      const cls = top.classes?.[0] || {};
+      osBlock = `
+        <div class="kv">
+          <div>Match</div><div>${esc(top.name)} <span style="color:#888">(${esc(top.accuracy)}%)</span></div>
+          <div>Type</div><div>${esc(cls.type || "—")}</div>
+          <div>Vendor</div><div>${esc(cls.vendor || "—")}</div>
+          <div>Family</div><div>${esc(cls.osfamily || "—")}</div>
+          <div>Generation</div><div>${esc(cls.osgen || "—")}</div>
+        </div>
+        ${best.length > 1 ? `<details style="margin-top:6px"><summary style="color:#888;cursor:pointer">Other matches (${best.length - 1})</summary>
+          ${best.slice(1).map(m => `<div style="margin-top:6px;color:#bbb">${esc(m.name)} <span style="color:#888">(${esc(m.accuracy)}%)</span></div>`).join("")}
+        </details>` : ""}
+      `;
+    }
+
+    const uptime = d.os?.uptime
+      ? `${Math.floor(d.os.uptime.seconds / 3600)}h ${Math.floor((d.os.uptime.seconds % 3600)/60)}m (booted ${esc(d.os.uptime.lastboot || "?")})`
+      : "—";
+
+    const extra = (d.extraports || []).map(e => `${e.count} ${esc(e.state)}`).join(", ") || "—";
+
+    const portsTable = (ports) => `
+      <table>
+        <tr><th>Port</th><th>State</th><th>Service</th><th>Version</th></tr>
+        ${ports.map(p => `
+          <tr>
+            <td><code>${esc(p.port)}/${esc(p.protocol)}</code></td>
+            <td class="state-${esc(p.state)}">${esc(p.state)}</td>
+            <td>${esc(p.service || "")}${p.tunnel ? ` <span style="color:#888">(${esc(p.tunnel)})</span>` : ""}</td>
+            <td>${esc([p.product, p.version, p.extrainfo].filter(Boolean).join(" "))}</td>
+          </tr>`).join("")}
+      </table>`;
+
+    sb.html(`
+      <h2>${esc(d.hostname || d.ip)}</h2>
+      <div style="color:#888">${esc(d.ip)}</div>
+
+      <h3>Identity</h3>
+      <div class="kv">
+        <div>IP</div><div><code>${esc(d.ip)}</code></div>
+        <div>MAC</div><div><code>${esc(d.mac || "—")}</code></div>
+        <div>Vendor</div><div>${esc(d.vendor || "—")}</div>
+        <div>Hostnames</div><div>${(d.hostnames||[]).map(esc).join(", ") || "—"}</div>
+      </div>
+
+      <h3>Operating System</h3>
+      ${osBlock}
+      <div class="kv" style="margin-top:6px">
+        <div>Uptime</div><div>${uptime}</div>
+      </div>
+
+      <h3>Open Ports (${openPorts.length})</h3>
+      ${openPorts.length ? portsTable(openPorts) : "<p style='color:#888'>None.</p>"}
+
+      ${otherPorts.length ? `
+        <h3>Other Ports (${otherPorts.length})</h3>
+        ${portsTable(otherPorts)}
+      ` : ""}
+
+      <h3>Bulk Port States</h3>
+      <div style="color:#888">${extra}</div>
+    `);
+  }
+});
+</script>
+</body>
+</html>
